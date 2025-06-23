@@ -20,6 +20,7 @@ use crate::{
 
 #[cfg(feature = "auth-middle")]
 /// Custom bearer token interceptor for tonic 0.13.1
+#[derive(Debug, Clone)]
 pub struct BearerTokenInterceptor {
     token: String,
 }

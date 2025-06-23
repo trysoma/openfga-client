@@ -11,6 +11,7 @@ resolver = "2"
 rust-version = "1.81.0"
 
 [features]
+default = ["all"]
 all = ["tls-rustls", "tls-native-roots", "auth-middle"]
 tls-rustls = ["tonic/tls-aws-lc"]
 tls-native-roots = ["tonic/tls-native-roots"]
