@@ -23,7 +23,7 @@ pub enum Error {
     InvalidToken { reason: String },
     #[cfg(feature = "auth-middle")]
     #[error("Failed to fetch or refresh Client Credentials: {0}")]
-    CredentialRefreshError(#[source] middle::Error),
+    CredentialRefreshError(String),
     #[error(
         "Invalid OpenFGA Model Version: `{0}`. Model Versions must have the format `major.minor`"
     )]

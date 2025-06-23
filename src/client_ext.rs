@@ -4,6 +4,7 @@ use tonic::{
     codegen::{Body, Bytes, StdError},
     service::interceptor::InterceptorLayer,
     transport::{Channel, Endpoint},
+    Request, Status,
 };
 #[cfg(feature = "auth-middle")]
 use tower::{util::Either, ServiceBuilder};
@@ -18,49 +19,138 @@ use crate::{
 };
 
 #[cfg(feature = "auth-middle")]
+/// Custom bearer token interceptor for tonic 0.13.1
+pub struct BearerTokenInterceptor {
+    token: String,
+}
+
+#[cfg(feature = "auth-middle")]
+impl BearerTokenInterceptor {
+    pub fn new(token: &str) -> Result<Self> {
+        if token.is_empty() {
+            return Err(Error::InvalidToken {
+                reason: "Token cannot be empty".to_string(),
+            });
+        }
+        Ok(Self {
+            token: format!("Bearer {}", token),
+        })
+    }
+}
+
+#[cfg(feature = "auth-middle")]
+impl tonic::service::Interceptor for BearerTokenInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> std::result::Result<Request<()>, Status> {
+        request
+            .metadata_mut()
+            .insert("authorization", self.token.parse().unwrap());
+        Ok(request)
+    }
+}
+
+#[cfg(feature = "auth-middle")]
+/// Custom client credentials interceptor for tonic 0.13.1
+pub struct ClientCredentialsInterceptor {
+    token: String,
+}
+
+#[cfg(feature = "auth-middle")]
+impl ClientCredentialsInterceptor {
+    pub async fn new(
+        client_id: &str,
+        client_secret: &str,
+        token_endpoint: url::Url,
+        scopes: &[&str],
+    ) -> Result<Self> {
+        // Simple OAuth2 client credentials flow
+        let client = reqwest::Client::new();
+        
+        let mut form_data = std::collections::HashMap::new();
+        form_data.insert("grant_type", "client_credentials");
+        form_data.insert("client_id", client_id);
+        form_data.insert("client_secret", client_secret);
+        
+        let scope_string;
+        if !scopes.is_empty() {
+            scope_string = scopes.join(" ");
+            form_data.insert("scope", &scope_string);
+        }
+        
+        let response = client
+            .post(token_endpoint)
+            .form(&form_data)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to exchange client credentials: {e}");
+                Error::CredentialRefreshError(format!("Failed to exchange credentials: {}", e))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(Error::CredentialRefreshError(format!(
+                "HTTP {}: {}",
+                status,
+                error_text
+            )));
+        }
+        let token_response: serde_json::Value = response.json().await.map_err(|e| {
+            tracing::error!("Failed to parse token response: {e}");
+            Error::CredentialRefreshError(format!("Failed to parse token response: {}", e))
+        })?;
+        let access_token = token_response["access_token"]
+            .as_str()
+            .ok_or_else(|| {
+                Error::CredentialRefreshError("No access_token in response".to_string())
+            })?;
+        Ok(Self {
+            token: format!("Bearer {}", access_token),
+        })
+    }
+}
+
+#[cfg(feature = "auth-middle")]
+impl tonic::service::Interceptor for ClientCredentialsInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> std::result::Result<Request<()>, Status> {
+        request
+            .metadata_mut()
+            .insert("authorization", self.token.parse().unwrap());
+        Ok(request)
+    }
+}
+
+#[cfg(feature = "auth-middle")]
 /// Specialization of the [`OpenFgaServiceClient`] that includes optional
 /// authentication with pre-shared keys (Bearer tokens) or client credentials.
 /// For more fine-granular control, you can construct [`OpenFgaServiceClient`] directly
 /// using interceptors for Authentication.
-pub type BasicOpenFgaServiceClient = OpenFgaServiceClient<BasicAuthLayer>;
+pub type BasicOpenFgaServiceClient<T> = OpenFgaServiceClient<T>;
 
 #[cfg(feature = "auth-middle")]
-impl BasicOpenFgaServiceClient {
+pub struct BasicOpenFgaServiceClients;
+
+#[cfg(feature = "auth-middle")]
+impl BasicOpenFgaServiceClients {
     /// Create a new client without authentication.
     ///
     /// # Errors
     /// * [`Error::InvalidEndpoint`] if the endpoint is not a valid URL.
-    pub fn new_unauthenticated(endpoint: impl Into<url::Url>) -> Result<Self> {
-        let either_or_option: EitherOrOption = None;
-        let auth_layer = tower::util::option_layer(either_or_option);
+    pub fn new_unauthenticated(endpoint: impl Into<url::Url>) -> Result<BasicOpenFgaServiceClient<Channel>> {
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
-        let c = ServiceBuilder::new()
-            .layer(auth_layer)
-            .service(endpoint.connect_lazy());
-        Ok(BasicOpenFgaServiceClient::new(c))
+        let channel = endpoint.connect_lazy();
+        Ok(OpenFgaServiceClient::new(channel))
     }
 
-    /// Create a new client without authentication.
+    /// Create a new client with bearer token authentication.
     ///
     /// # Errors
     /// * [`Error::InvalidEndpoint`] if the endpoint is not a valid URL.
-    /// * [`Error::InvalidToken`] if the token is not valid ASCII.
-    pub fn new_with_basic_auth(endpoint: impl Into<url::Url>, token: &str) -> Result<Self> {
-        let either_or_option: EitherOrOption =
-            Some(tower::util::Either::Right(tonic::service::interceptor(
-                middle::BearerTokenAuthorizer::new(token).map_err(|e| {
-                    tracing::error!("Could not construct OpenFGA client. Invalid token: {e}");
-                    Error::InvalidToken {
-                        reason: e.to_string(),
-                    }
-                })?,
-            )));
-        let auth_layer = tower::util::option_layer(either_or_option);
+    /// * [`Error::InvalidToken`] if the token is not valid.
+    pub fn new_with_basic_auth(endpoint: impl Into<url::Url>, token: &str) -> Result<BasicOpenFgaServiceClient<tonic::service::interceptor::InterceptedService<Channel, BearerTokenInterceptor>>> {
+        let interceptor = BearerTokenInterceptor::new(token)?;
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
-        let c = ServiceBuilder::new()
-            .layer(auth_layer)
-            .service(endpoint.connect_lazy());
-        Ok(BasicOpenFgaServiceClient::new(c))
+        let channel = endpoint.connect_lazy();
+        Ok(OpenFgaServiceClient::with_interceptor(channel, interceptor))
     }
 
     /// Create a new client using client credentials.
@@ -74,33 +164,16 @@ impl BasicOpenFgaServiceClient {
         client_secret: &str,
         token_endpoint: impl Into<url::Url>,
         scopes: &[&str],
-    ) -> Result<Self> {
-        let either_or_option: EitherOrOption =
-            Some(tower::util::Either::Left(tonic::service::interceptor(
-                {
-                let builder = middle::BasicClientCredentialAuthorizer::basic_builder(
-                    client_id,
-                    client_secret,
-                    token_endpoint.into(),
-                );
-                if scopes.is_empty() {
-                    builder
-                } else {
-                    builder.add_scopes(scopes)
-                }
-            }
-                .build()
-                .await.map_err(|e| {
-                    tracing::error!("Could not construct OpenFGA client. Failed to fetch or refresh Client Credentials: {e}");
-                    Error::CredentialRefreshError(e)
-                })?,
-            )));
-        let auth_layer = tower::util::option_layer(either_or_option);
+    ) -> Result<BasicOpenFgaServiceClient<tonic::service::interceptor::InterceptedService<Channel, ClientCredentialsInterceptor>>> {
+        let interceptor = ClientCredentialsInterceptor::new(
+            client_id,
+            client_secret,
+            token_endpoint.into(),
+            scopes,
+        ).await?;
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
-        let c = ServiceBuilder::new()
-            .layer(auth_layer)
-            .service(endpoint.connect_lazy());
-        Ok(BasicOpenFgaServiceClient::new(c))
+        let channel = endpoint.connect_lazy();
+        Ok(OpenFgaServiceClient::with_interceptor(channel, interceptor))
     }
 }
 
@@ -238,24 +311,7 @@ where
 }
 
 #[cfg(feature = "auth-middle")]
-pub type BasicAuthLayer = tower::util::Either<
-    tower::util::Either<
-        tonic::service::interceptor::InterceptedService<
-            Channel,
-            middle::BasicClientCredentialAuthorizer,
-        >,
-        tonic::service::interceptor::InterceptedService<Channel, middle::BearerTokenAuthorizer>,
-    >,
-    Channel,
->;
-
-#[cfg(feature = "auth-middle")]
-type EitherOrOption = Option<
-    Either<
-        InterceptorLayer<middle::BasicClientCredentialAuthorizer>,
-        InterceptorLayer<middle::BearerTokenAuthorizer>,
-    >,
->;
+pub type BasicAuthLayer = Channel;
 
 #[cfg(feature = "auth-middle")]
 fn get_tonic_endpoint_logged(endpoint: &url::Url) -> Result<Endpoint> {
@@ -283,13 +339,13 @@ pub(crate) mod test {
             generated::AuthorizationModel,
         };
 
-        fn get_basic_client() -> BasicOpenFgaServiceClient {
+        fn get_basic_client() -> BasicOpenFgaServiceClient<Channel> {
             let endpoint = std::env::var("TEST_OPENFGA_CLIENT_GRPC_URL").unwrap();
-            BasicOpenFgaServiceClient::new_unauthenticated(url::Url::parse(&endpoint).unwrap())
+            BasicOpenFgaServiceClients::new_unauthenticated(url::Url::parse(&endpoint).unwrap())
                 .expect("Client can be created")
         }
 
-        async fn new_store() -> (BasicOpenFgaServiceClient, Store) {
+        async fn new_store() -> (BasicOpenFgaServiceClient<Channel>, Store) {
             let mut client = get_basic_client();
             let store_name = format!("store-{}", uuid::Uuid::now_v7());
             let store = client
@@ -300,7 +356,7 @@ pub(crate) mod test {
         }
 
         async fn create_entitlements_model(
-            client: &mut BasicOpenFgaServiceClient,
+            client: &mut BasicOpenFgaServiceClient<Channel>,
             store: &Store,
         ) -> WriteAuthorizationModelResponse {
             let schema = include_str!("../tests/sample-store/entitlements/schema.json");
