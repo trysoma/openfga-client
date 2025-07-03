@@ -65,18 +65,18 @@ impl ClientCredentialsInterceptor {
     ) -> Result<Self> {
         // Simple OAuth2 client credentials flow
         let client = reqwest::Client::new();
-        
+
         let mut form_data = std::collections::HashMap::new();
         form_data.insert("grant_type", "client_credentials");
         form_data.insert("client_id", client_id);
         form_data.insert("client_secret", client_secret);
-        
+
         let scope_string;
         if !scopes.is_empty() {
             scope_string = scopes.join(" ");
             form_data.insert("scope", &scope_string);
         }
-        
+
         let response = client
             .post(token_endpoint)
             .form(&form_data)
@@ -91,19 +91,16 @@ impl ClientCredentialsInterceptor {
             let error_text = response.text().await.unwrap_or_default();
             return Err(Error::CredentialRefreshError(format!(
                 "HTTP {}: {}",
-                status,
-                error_text
+                status, error_text
             )));
         }
         let token_response: serde_json::Value = response.json().await.map_err(|e| {
             tracing::error!("Failed to parse token response: {e}");
             Error::CredentialRefreshError(format!("Failed to parse token response: {}", e))
         })?;
-        let access_token = token_response["access_token"]
-            .as_str()
-            .ok_or_else(|| {
-                Error::CredentialRefreshError("No access_token in response".to_string())
-            })?;
+        let access_token = token_response["access_token"].as_str().ok_or_else(|| {
+            Error::CredentialRefreshError("No access_token in response".to_string())
+        })?;
         Ok(Self {
             token: format!("Bearer {}", access_token),
         })
@@ -136,7 +133,9 @@ impl BasicOpenFgaServiceClients {
     ///
     /// # Errors
     /// * [`Error::InvalidEndpoint`] if the endpoint is not a valid URL.
-    pub fn new_unauthenticated(endpoint: impl Into<url::Url>) -> Result<BasicOpenFgaServiceClient<Channel>> {
+    pub fn new_unauthenticated(
+        endpoint: impl Into<url::Url>,
+    ) -> Result<BasicOpenFgaServiceClient<Channel>> {
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
         let channel = endpoint.connect_lazy();
         Ok(OpenFgaServiceClient::new(channel))
@@ -147,7 +146,14 @@ impl BasicOpenFgaServiceClients {
     /// # Errors
     /// * [`Error::InvalidEndpoint`] if the endpoint is not a valid URL.
     /// * [`Error::InvalidToken`] if the token is not valid.
-    pub fn new_with_basic_auth(endpoint: impl Into<url::Url>, token: &str) -> Result<BasicOpenFgaServiceClient<tonic::service::interceptor::InterceptedService<Channel, BearerTokenInterceptor>>> {
+    pub fn new_with_basic_auth(
+        endpoint: impl Into<url::Url>,
+        token: &str,
+    ) -> Result<
+        BasicOpenFgaServiceClient<
+            tonic::service::interceptor::InterceptedService<Channel, BearerTokenInterceptor>,
+        >,
+    > {
         let interceptor = BearerTokenInterceptor::new(token)?;
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
         let channel = endpoint.connect_lazy();
@@ -165,13 +171,18 @@ impl BasicOpenFgaServiceClients {
         client_secret: &str,
         token_endpoint: impl Into<url::Url>,
         scopes: &[&str],
-    ) -> Result<BasicOpenFgaServiceClient<tonic::service::interceptor::InterceptedService<Channel, ClientCredentialsInterceptor>>> {
+    ) -> Result<
+        BasicOpenFgaServiceClient<
+            tonic::service::interceptor::InterceptedService<Channel, ClientCredentialsInterceptor>,
+        >,
+    > {
         let interceptor = ClientCredentialsInterceptor::new(
             client_id,
             client_secret,
             token_endpoint.into(),
             scopes,
-        ).await?;
+        )
+        .await?;
         let endpoint = get_tonic_endpoint_logged(&endpoint.into())?;
         let channel = endpoint.connect_lazy();
         Ok(OpenFgaServiceClient::with_interceptor(channel, interceptor))
