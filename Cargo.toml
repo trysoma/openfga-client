@@ -13,7 +13,7 @@ rust-version = "1.81.0"
 [features]
 default = ["all"]
 all = ["tls-rustls", "tls-native-roots", "auth-middle"]
-tls-rustls = ["tonic/tls-aws-lc"]
+tls-rustls = ["tonic/tls-aws-lc", "reqwest/rustls-tls"]
 tls-native-roots = ["tonic/tls-native-roots"]
 tls-webpki-roots = ["tonic/tls-webpki-roots"]
 auth-middle = ["dep:reqwest", "dep:oauth2", "dep:serde_json", "tower"]
@@ -27,7 +27,7 @@ prost = { version = "0.13", features = ["std", "prost-derive"] }
 prost-types = "0.13"
 prost-wkt = "0.6"
 prost-wkt-types = { version = "0.6", features = ["vendored-protoc"] }
-reqwest = { version = "0.12", optional = true, features = ["json"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", optional = true }
 thiserror = { version = "2.0" }
